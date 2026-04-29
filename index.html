@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- saved from url=(0062)file:///C:/Users/liyangkun/Downloads/classroom-feedback_2.html -->
+<!-- saved from url=(0062)file:///C:/Users/liyangkun/Downloads/classroom-feedback_3.html -->
 <html lang="zh-CN"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
 
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -199,21 +199,20 @@
   }
 
   function renderHistory(rounds) {
-    // 排除 currentRound，只取已归档的（有 endedAt 字段的）
     const hist = Object.entries(rounds)
-      .filter(([,v]) => v.endedAt)
-      .sort(([a],[b]) => a-b);
+      .filter(([,v]) => v && v.endedAt)
+      .sort(([a],[b]) => Number(a)-Number(b));
 
     const hl = document.getElementById("history-list");
     if (!hist.length) { hl.innerHTML = '<div style="font-size:13px;color:#888;padding:8px 0">暂无历史记录</div>'; }
     else {
       hl.innerHTML = hist.slice().reverse().map(([,r]) => {
-        const subs  = r.submissions || {};
-        const c     = { got:0, partial:0, lost:0 };
-        Object.values(subs).forEach(s => c[s.status]++);
-        const tot   = c.got + c.partial + c.lost;
-        const dt    = new Date(r.endedAt).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"});
-        const w     = v => tot ? Math.max(4, Math.round(v/tot*80)) : 4;
+        const subs = r.submissions || {};
+        const c = { got:0, partial:0, lost:0 };
+        Object.values(subs).forEach(s => { if(s && s.status && c[s.status]!==undefined) c[s.status]++; });
+        const tot = c.got + c.partial + c.lost;
+        const dt  = new Date(r.endedAt).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"});
+        const w   = v => tot ? Math.max(4, Math.round(v/tot*80)) : 4;
         return `<div class="history-item">
           <span class="history-time">${dt}</span>
           <div class="history-bars">
@@ -226,27 +225,22 @@
       }).join("");
     }
 
-    // 趋势图
-    if (trendChart) {
-      trendChart.data.labels = hist.map((_,i) => `第${i+1}轮`);
-      trendChart.data.datasets[0].data = hist.map(([,r]) => {
-        const subs = r.submissions||{}; const tot = Object.keys(subs).length;
-        const got  = Object.values(subs).filter(s=>s.status==="got").length;
-        return tot ? Math.round(got/tot*100) : 0;
-      });
-      trendChart.data.datasets[1].data = hist.map(([,r]) => {
-        const subs = r.submissions||{}; const tot = Object.keys(subs).length;
-        const p    = Object.values(subs).filter(s=>s.status==="partial").length;
-        return tot ? Math.round(p/tot*100) : 0;
-      });
-      trendChart.data.datasets[2].data = hist.map(([,r]) => {
-        const subs = r.submissions||{}; const tot = Object.keys(subs).length;
-        const lost = Object.values(subs).filter(s=>s.status==="lost").length;
-        return tot ? Math.round(lost/tot*100) : 0;
-      });
-      trendChart.update("active");
-      document.getElementById("rounds-label").textContent = hist.length ? `共 ${hist.length} 轮历史记录` : "";
-    }
+    if (!trendChart) initTrendChart();
+    trendChart.data.labels = hist.map((_,i) => `第${i+1}轮`);
+    trendChart.data.datasets[0].data = hist.map(([,r]) => {
+      const subs=r.submissions||{}; const vals=Object.values(subs).filter(s=>s&&s.status);
+      const tot=vals.length; return tot ? Math.round(vals.filter(s=>s.status==="got").length/tot*100) : 0;
+    });
+    trendChart.data.datasets[1].data = hist.map(([,r]) => {
+      const subs=r.submissions||{}; const vals=Object.values(subs).filter(s=>s&&s.status);
+      const tot=vals.length; return tot ? Math.round(vals.filter(s=>s.status==="partial").length/tot*100) : 0;
+    });
+    trendChart.data.datasets[2].data = hist.map(([,r]) => {
+      const subs=r.submissions||{}; const vals=Object.values(subs).filter(s=>s&&s.status);
+      const tot=vals.length; return tot ? Math.round(vals.filter(s=>s.status==="lost").length/tot*100) : 0;
+    });
+    trendChart.update();
+    document.getElementById("rounds-label").textContent = hist.length ? `共 ${hist.length} 轮历史记录` : "";
   }
 
   // ── 新一轮 ──────────────────────────────────────────────
@@ -448,19 +442,19 @@
 
 <div class="topbar">
   <span class="topbar-title">课堂反馈</span>
-  <button class="tab active" onclick="switchTab(&#39;student&#39;)">学生端</button>
-  <button class="tab" onclick="switchTab(&#39;teacher&#39;)">展示端</button>
+  <button class="tab" onclick="switchTab(&#39;student&#39;)">学生端</button>
+  <button class="tab active" onclick="switchTab(&#39;teacher&#39;)">展示端</button>
 </div>
 
 <!-- ══ 学生端 ══════════════════════════════════════════════ -->
-<div id="panel-student" class="panel active">
+<div id="panel-student" class="panel">
   <div id="config-warning" class="config-banner" style="display: none;">
     ⚠️ <strong>尚未配置 Firebase</strong> — 请先按照下方步骤填入你的
     <code>firebaseConfig</code>，否则数据无法同步。
   </div>
 
   <div class="card" style="max-width:420px;margin:0 auto">
-    <div id="name-setup" style="display: block;">
+    <div id="name-setup" style="display: none;">
       <div class="section-label">输入你的昵称</div>
       <div class="name-row">
         <input class="name-input" id="nickname-input" placeholder="例如：小明、Jane..." maxlength="12" onkeydown="if(event.key===&#39;Enter&#39;)confirmName()">
@@ -469,7 +463,7 @@
       <div id="name-error" style="font-size:12px;color:#A32D2D;display:none;margin-top:6px">请输入昵称才能继续</div>
     </div>
 
-    <div id="feedback-form" style="display: none;">
+    <div id="feedback-form" style="display: block;">
       <div class="identity-row">
         <div class="avatar" id="student-avatar" style="background: rgba(239, 159, 39, 0.2); color: rgb(239, 159, 39);">JA</div>
         <div>
@@ -479,25 +473,25 @@
         <span class="change-link" onclick="changeName()">更换</span>
       </div>
       <div class="choices">
-        <button class="choice-btn" id="btn-got" onclick="selectChoice(&#39;got&#39;)" style="">
+        <button class="choice-btn sel-got" id="btn-got" onclick="selectChoice(&#39;got&#39;)" style="pointer-events: none;">
           <span class="dot d-got"></span>听懂了，继续吧
         </button>
-        <button class="choice-btn" id="btn-partial" onclick="selectChoice(&#39;partial&#39;)" style="">
+        <button class="choice-btn" id="btn-partial" onclick="selectChoice(&#39;partial&#39;)" style="pointer-events: none;">
           <span class="dot d-partial"></span>有点困惑，稍微慢一点
         </button>
-        <button class="choice-btn" id="btn-lost" onclick="selectChoice(&#39;lost&#39;)" style="">
+        <button class="choice-btn" id="btn-lost" onclick="selectChoice(&#39;lost&#39;)" style="pointer-events: none;">
           <span class="dot d-lost"></span>需要再讲一遍
         </button>
       </div>
-      <button class="submit-btn" id="submit-btn" onclick="submitFeedback()" disabled="" style="">提交反馈</button>
-      <div class="toast" id="toast" style="display: none;">✓ 已收到你的反馈！</div>
-      <div id="submitted-info" style="display: none; font-size: 12px; color: rgb(136, 136, 136); margin-top: 8px; text-align: center;">提交时间：11:08:31</div>
+      <button class="submit-btn" id="submit-btn" onclick="submitFeedback()" style="display: none;">提交反馈</button>
+      <div class="toast" id="toast" style="display: block;">✓ 已收到你的反馈！</div>
+      <div id="submitted-info" style="display: block; font-size: 12px; color: rgb(136, 136, 136); margin-top: 8px; text-align: center;">提交时间：11:29:43</div>
     </div>
   </div>
 </div>
 
 <!-- ══ 展示端 ══════════════════════════════════════════════ -->
-<div id="panel-teacher" class="panel">
+<div id="panel-teacher" class="panel active">
   <div class="row-between">
     <span class="dash-title">课堂脉搏</span>
     <div style="display:flex;gap:8px;align-items:center">
@@ -551,16 +545,72 @@
       <span class="legend-item"><span class="legend-sq" style="background:#BA7517;opacity:.7"></span>困惑 %</span>
       <span class="legend-item"><span class="legend-sq" style="background:#E24B4A;opacity:.7"></span>再讲 %</span>
     </div>
-    <div class="rounds-label" id="rounds-label">共 1 轮历史记录</div>
+    <div class="rounds-label" id="rounds-label">共 8 轮历史记录</div>
   </div>
 
   <div class="card">
     <div class="section-label">轮次记录</div>
     <div class="history-list" id="history-list"><div class="history-item">
-          <span class="history-time">11:08</span>
+          <span class="history-time">11:29</span>
           <div class="history-bars">
             <div class="hbar" style="width:80px;background:#1D9E75" title="听懂了 1"></div>
             <div class="hbar" style="width:4px;background:#BA7517" title="困惑 0"></div>
+            <div class="hbar" style="width:4px;background:#E24B4A" title="再讲 0"></div>
+          </div>
+          <span class="history-total">1人</span>
+        </div><div class="history-item">
+          <span class="history-time">11:29</span>
+          <div class="history-bars">
+            <div class="hbar" style="width:80px;background:#1D9E75" title="听懂了 1"></div>
+            <div class="hbar" style="width:4px;background:#BA7517" title="困惑 0"></div>
+            <div class="hbar" style="width:4px;background:#E24B4A" title="再讲 0"></div>
+          </div>
+          <span class="history-total">1人</span>
+        </div><div class="history-item">
+          <span class="history-time">11:27</span>
+          <div class="history-bars">
+            <div class="hbar" style="width:80px;background:#1D9E75" title="听懂了 1"></div>
+            <div class="hbar" style="width:4px;background:#BA7517" title="困惑 0"></div>
+            <div class="hbar" style="width:4px;background:#E24B4A" title="再讲 0"></div>
+          </div>
+          <span class="history-total">1人</span>
+        </div><div class="history-item">
+          <span class="history-time">11:26</span>
+          <div class="history-bars">
+            <div class="hbar" style="width:80px;background:#1D9E75" title="听懂了 1"></div>
+            <div class="hbar" style="width:4px;background:#BA7517" title="困惑 0"></div>
+            <div class="hbar" style="width:4px;background:#E24B4A" title="再讲 0"></div>
+          </div>
+          <span class="history-total">1人</span>
+        </div><div class="history-item">
+          <span class="history-time">11:24</span>
+          <div class="history-bars">
+            <div class="hbar" style="width:4px;background:#1D9E75" title="听懂了 0"></div>
+            <div class="hbar" style="width:4px;background:#BA7517" title="困惑 0"></div>
+            <div class="hbar" style="width:4px;background:#E24B4A" title="再讲 0"></div>
+          </div>
+          <span class="history-total">0人</span>
+        </div><div class="history-item">
+          <span class="history-time">11:24</span>
+          <div class="history-bars">
+            <div class="hbar" style="width:4px;background:#1D9E75" title="听懂了 0"></div>
+            <div class="hbar" style="width:4px;background:#BA7517" title="困惑 0"></div>
+            <div class="hbar" style="width:4px;background:#E24B4A" title="再讲 0"></div>
+          </div>
+          <span class="history-total">0人</span>
+        </div><div class="history-item">
+          <span class="history-time">11:24</span>
+          <div class="history-bars">
+            <div class="hbar" style="width:4px;background:#1D9E75" title="听懂了 0"></div>
+            <div class="hbar" style="width:4px;background:#BA7517" title="困惑 0"></div>
+            <div class="hbar" style="width:4px;background:#E24B4A" title="再讲 0"></div>
+          </div>
+          <span class="history-total">0人</span>
+        </div><div class="history-item">
+          <span class="history-time">11:24</span>
+          <div class="history-bars">
+            <div class="hbar" style="width:4px;background:#1D9E75" title="听懂了 0"></div>
+            <div class="hbar" style="width:80px;background:#BA7517" title="困惑 1"></div>
             <div class="hbar" style="width:4px;background:#E24B4A" title="再讲 0"></div>
           </div>
           <span class="history-total">1人</span>
