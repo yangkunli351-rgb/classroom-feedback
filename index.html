@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<!-- saved from url=(0062)file:///C:/Users/liyangkun/Downloads/classroom-feedback_2.html -->
+<html lang="zh-CN"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>课堂反馈系统</title>
+
+<!-- ======================================================
+     🔧 第一步：把下面的 firebaseConfig 替换成你自己的配置
+     ====================================================== -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, set, onValue, push, remove, get }
+    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey:            "AIzaSyC1mgRwg5qpJMgcAD1mCq1iPfZY-KBP82M",
+    authDomain:        "p429-6c243.firebaseapp.com",
+    databaseURL:       "https://p429-6c243-default-rtdb.firebaseio.com",
+    projectId:         "p429-6c243",
+    storageBucket:     "p429-6c243.firebasestorage.app",
+    messagingSenderId: "152748266865",
+    appId:             "1:152748266865:web:a4a4ab7ab758a4e0e6d2d0",
+    measurementId:     "G-4Y11442S8Z"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getDatabase(app);
+
+  // ── 全局状态 ────────────────────────────────────────────
+  let nickname    = null;
+  let selChoice   = null;
+  let submitted   = false;
+  let currentRoundKey = null;
+
+  const COLORS = { got:"#1D9E75", partial:"#BA7517", lost:"#E24B4A" };
+  const AVATAR_PALETTE = ["#5DCAA5","#EF9F27","#378ADD","#D4537E","#7F77DD","#97C459"];
+  const STATUS_LABEL   = { got:"听懂了", partial:"有点困惑", lost:"需要再讲" };
+
+  function avatarColor(n) {
+    let h = 0; for (const c of n) h = (h*31 + c.charCodeAt(0)) % AVATAR_PALETTE.length;
+    return AVATAR_PALETTE[h];
+  }
+  function initials(n) { return n.slice(0,2).toUpperCase(); }
+
+  // ── 获取 / 创建当前轮次 ─────────────────────────────────
+  async function ensureRound() {
+    const snap = await get(ref(db, "currentRound"));
+    if (!snap.exists()) {
+      const key = Date.now().toString();
+      await set(ref(db, "currentRound"), { id: key, startedAt: Date.now() });
+      currentRoundKey = key;
+    } else {
+      currentRoundKey = snap.val().id;
+    }
+    return currentRoundKey;
+  }
+
+  // ── 学生端：确认昵称 ────────────────────────────────────
+  window.confirmName = async () => {
+    const val = document.getElementById("nickname-input").value.trim();
+    if (!val) { document.getElementById("name-error").style.display = "block"; return; }
+    document.getElementById("name-error").style.display = "none";
+    nickname = val;
+    await ensureRound();
+
+    // 检查本轮是否已提交
+    const snap = await get(ref(db, `rounds/${currentRoundKey}/submissions/${nickname}`));
+    if (snap.exists()) {
+      const d = snap.val();
+      selChoice = d.status; submitted = true;
+      showIdentity(); applySelection(d.status); showToast(d.ts);
+    } else {
+      showIdentity();
+    }
+  };
+
+  function showIdentity() {
+    document.getElementById("name-setup").style.display = "none";
+    document.getElementById("feedback-form").style.display = "block";
+    const av = document.getElementById("student-avatar");
+    av.style.background = avatarColor(nickname) + "33";
+    av.style.color = avatarColor(nickname);
+    av.textContent = initials(nickname);
+    document.getElementById("student-name-display").textContent = nickname;
+  }
+
+  window.changeName = () => {
+    nickname = null; selChoice = null; submitted = false;
+    document.getElementById("feedback-form").style.display = "none";
+    document.getElementById("name-setup").style.display = "block";
+    document.getElementById("nickname-input").value = "";
+    document.getElementById("toast").style.display = "none";
+    document.getElementById("submitted-info").style.display = "none";
+    document.getElementById("submit-btn").style.display = "";
+    document.getElementById("submit-btn").disabled = true;
+    ["got","partial","lost"].forEach(k => {
+      document.getElementById("btn-"+k).className = "choice-btn";
+      document.getElementById("btn-"+k).style.pointerEvents = "";
+    });
+  };
+
+  window.selectChoice = (c) => {
+    if (submitted) return;
+    selChoice = c;
+    ["got","partial","lost"].forEach(k => {
+      document.getElementById("btn-"+k).className = "choice-btn" + (k===c ? " sel-"+k : "");
+    });
+    document.getElementById("submit-btn").disabled = false;
+  };
+
+  window.submitFeedback = async () => {
+    if (!selChoice || submitted || !nickname) return;
+    await ensureRound();
+    await set(ref(db, `rounds/${currentRoundKey}/submissions/${nickname}`), {
+      status: selChoice, ts: Date.now()
+    });
+    submitted = true;
+    applySelection(selChoice);
+    showToast(Date.now());
+  };
+
+  function applySelection(c) {
+    ["got","partial","lost"].forEach(k => {
+      document.getElementById("btn-"+k).className = "choice-btn" + (k===c ? " sel-"+k : "");
+      document.getElementById("btn-"+k).style.pointerEvents = "none";
+    });
+    document.getElementById("submit-btn").style.display = "none";
+  }
+
+  function showToast(ts) {
+    document.getElementById("toast").style.display = "block";
+    const d = new Date(ts);
+    const info = document.getElementById("submitted-info");
+    info.textContent = "提交时间：" + d.toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+    info.style.display = "block";
+  }
+
+  // ── 展示端：实时监听 ────────────────────────────────────
+  let barChart   = null;
+  let trendChart = null;
+  let unsubRound = null;
+  let unsubSubs  = null;
+
+  window.initDashboard = () => {
+    // 监听当前轮次变化
+    unsubRound = onValue(ref(db, "currentRound"), snap => {
+      if (!snap.exists()) return;
+      currentRoundKey = snap.val().id;
+      // 监听该轮的提交
+      if (unsubSubs) unsubSubs();
+      unsubSubs = onValue(ref(db, `rounds/${currentRoundKey}/submissions`), sSnap => {
+        const subs = sSnap.exists() ? sSnap.val() : {};
+        renderCurrent(subs);
+      });
+    });
+    // 监听历史轮次
+    onValue(ref(db, "rounds"), rSnap => {
+      const rounds = rSnap.exists() ? rSnap.val() : {};
+      renderHistory(rounds);
+    });
+    if (!barChart)   initBarChart();
+    if (!trendChart) initTrendChart();
+  };
+
+  function renderCurrent(subs) {
+    const counts = { got:0, partial:0, lost:0 };
+    Object.values(subs).forEach(s => counts[s.status]++);
+    const total = counts.got + counts.partial + counts.lost;
+    const pct = v => total ? Math.round(v/total*100)+"%" : "—";
+
+    document.getElementById("m-got").textContent     = counts.got;
+    document.getElementById("m-partial").textContent = counts.partial;
+    document.getElementById("m-lost").textContent    = counts.lost;
+    document.getElementById("p-got").textContent     = pct(counts.got);
+    document.getElementById("p-partial").textContent = pct(counts.partial);
+    document.getElementById("p-lost").textContent    = pct(counts.lost);
+    document.getElementById("total-row").textContent = total ? `共 ${total} 人已反馈` : "尚未收到反馈";
+
+    if (barChart) {
+      barChart.data.datasets[0].data = [counts.got, counts.partial, counts.lost];
+      barChart.update("active");
+    }
+
+    // 学生名片
+    const grid = document.getElementById("students-grid");
+    const names = Object.keys(subs);
+    if (!names.length) {
+      grid.innerHTML = '<span style="font-size:12px;color:#888">暂无学生</span>';
+    } else {
+      grid.innerHTML = names.sort().map(n => {
+        const s = subs[n].status;
+        const ts = new Date(subs[n].ts).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"});
+        return `<span class="s-chip ${s}" title="${STATUS_LABEL[s]} · ${ts}">
+          <span class="chip-dot" style="background:${COLORS[s]}"></span>${n}
+        </span>`;
+      }).join("");
+    }
+  }
+
+  function renderHistory(rounds) {
+    // 排除 currentRound，只取已归档的（有 endedAt 字段的）
+    const hist = Object.entries(rounds)
+      .filter(([,v]) => v.endedAt)
+      .sort(([a],[b]) => a-b);
+
+    const hl = document.getElementById("history-list");
+    if (!hist.length) { hl.innerHTML = '<div style="font-size:13px;color:#888;padding:8px 0">暂无历史记录</div>'; }
+    else {
+      hl.innerHTML = hist.slice().reverse().map(([,r]) => {
+        const subs  = r.submissions || {};
+        const c     = { got:0, partial:0, lost:0 };
+        Object.values(subs).forEach(s => c[s.status]++);
+        const tot   = c.got + c.partial + c.lost;
+        const dt    = new Date(r.endedAt).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"});
+        const w     = v => tot ? Math.max(4, Math.round(v/tot*80)) : 4;
+        return `<div class="history-item">
+          <span class="history-time">${dt}</span>
+          <div class="history-bars">
+            <div class="hbar" style="width:${w(c.got)}px;background:#1D9E75" title="听懂了 ${c.got}"></div>
+            <div class="hbar" style="width:${w(c.partial)}px;background:#BA7517" title="困惑 ${c.partial}"></div>
+            <div class="hbar" style="width:${w(c.lost)}px;background:#E24B4A" title="再讲 ${c.lost}"></div>
+          </div>
+          <span class="history-total">${tot}人</span>
+        </div>`;
+      }).join("");
+    }
+
+    // 趋势图
+    if (trendChart) {
+      trendChart.data.labels = hist.map((_,i) => `第${i+1}轮`);
+      trendChart.data.datasets[0].data = hist.map(([,r]) => {
+        const subs = r.submissions||{}; const tot = Object.keys(subs).length;
+        const got  = Object.values(subs).filter(s=>s.status==="got").length;
+        return tot ? Math.round(got/tot*100) : 0;
+      });
+      trendChart.data.datasets[1].data = hist.map(([,r]) => {
+        const subs = r.submissions||{}; const tot = Object.keys(subs).length;
+        const p    = Object.values(subs).filter(s=>s.status==="partial").length;
+        return tot ? Math.round(p/tot*100) : 0;
+      });
+      trendChart.data.datasets[2].data = hist.map(([,r]) => {
+        const subs = r.submissions||{}; const tot = Object.keys(subs).length;
+        const lost = Object.values(subs).filter(s=>s.status==="lost").length;
+        return tot ? Math.round(lost/tot*100) : 0;
+      });
+      trendChart.update("active");
+      document.getElementById("rounds-label").textContent = hist.length ? `共 ${hist.length} 轮历史记录` : "";
+    }
+  }
+
+  // ── 新一轮 ──────────────────────────────────────────────
+  window.newRound = async () => {
+    if (!currentRoundKey) return;
+    // 归档当前轮（写入 endedAt）
+    await set(ref(db, `rounds/${currentRoundKey}/endedAt`), Date.now());
+    // 创建新轮次
+    const newKey = Date.now().toString();
+    await set(ref(db, "currentRound"), { id: newKey, startedAt: Date.now() });
+    // 学生端重置已提交状态（若同一用户仍在页面上）
+    submitted = false; selChoice = null;
+  };
+
+  // ── 清空所有 ────────────────────────────────────────────
+  window.clearAll = async () => {
+    if (!confirm("确认清空所有数据（包括历史记录）？")) return;
+    await remove(ref(db, "rounds"));
+    await remove(ref(db, "currentRound"));
+    submitted = false; selChoice = null;
+  };
+
+  // ── Chart.js 初始化 ─────────────────────────────────────
+  function initBarChart() {
+    barChart = new Chart(document.getElementById("barChart"), {
+      type: "bar",
+      data: {
+        labels: ["听懂了","有点困惑","需要再讲"],
+        datasets: [{ data:[0,0,0],
+          backgroundColor:["#1D9E75","#BA7517","#E24B4A"],
+          borderRadius:6, borderSkipped:false, barThickness:60 }]
+      },
+      options: {
+        responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label: c => c.raw+" 人"}}},
+        scales:{
+          x:{ grid:{display:false}, border:{display:false}, ticks:{font:{size:13},color:"#888"}},
+          y:{ beginAtZero:true, border:{display:false},
+              grid:{color:"rgba(0,0,0,.07)"}, ticks:{stepSize:1,font:{size:11},color:"#888"}}
+        }, animation:{duration:350}
+      }
+    });
+  }
+
+  function initTrendChart() {
+    trendChart = new Chart(document.getElementById("trendChart"), {
+      type:"line",
+      data:{
+        labels:[],
+        datasets:[
+          { label:"听懂了%", data:[], borderColor:"#1D9E75", backgroundColor:"#1D9E7520",
+            tension:.4, fill:true,  pointRadius:4, borderWidth:2 },
+          { label:"困惑%",   data:[], borderColor:"#BA7517", backgroundColor:"transparent",
+            tension:.4, fill:false, pointRadius:4, borderWidth:2, borderDash:[5,3] },
+          { label:"再讲%",   data:[], borderColor:"#E24B4A", backgroundColor:"transparent",
+            tension:.4, fill:false, pointRadius:4, borderWidth:2, borderDash:[2,4] }
+        ]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label: c => c.dataset.label+": "+c.raw+"%"}}},
+        scales:{
+          x:{ grid:{display:false}, border:{display:false}, ticks:{font:{size:11},color:"#888"}},
+          y:{ min:0, max:100, border:{display:false},
+              grid:{color:"rgba(0,0,0,.07)"}, ticks:{font:{size:11},color:"#888", callback: v => v+"%"}}
+        }, animation:{duration:400}
+      }
+    });
+  }
+
+  // ── Tab 切换 ────────────────────────────────────────────
+  window.switchTab = (tab) => {
+    document.querySelectorAll(".tab").forEach((t,i) =>
+      t.classList.toggle("active",(i===0&&tab==="student")||(i===1&&tab==="teacher")));
+    document.getElementById("panel-student").classList.toggle("active", tab==="student");
+    document.getElementById("panel-teacher").classList.toggle("active", tab==="teacher");
+    if (tab === "teacher") window.initDashboard();
+  };
+</script>
+
+<script src="./课堂反馈系统_files/chart.umd.js.下载"></script>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: #f5f4f0; color: #1a1a18; min-height: 100vh; }
+
+  /* ── 顶栏 ── */
+  .topbar { background: #fff; border-bottom: 0.5px solid #e0dfd8;
+            padding: 0 24px; display: flex; align-items: center; gap: 0; position: sticky; top: 0; z-index: 10; }
+  .topbar-title { font-size: 14px; font-weight: 500; color: #444; padding: 14px 0; margin-right: 24px; }
+  .tab { padding: 14px 20px; font-size: 13px; font-weight: 500; color: #888;
+         cursor: pointer; border: none; border-bottom: 2px solid transparent;
+         background: none; margin-bottom: -0.5px; }
+  .tab.active { color: #1a1a18; border-bottom-color: #1a1a18; }
+
+  /* ── 面板 ── */
+  .panel { display: none; padding: 24px; max-width: 740px; margin: 0 auto; }
+  .panel.active { display: block; }
+
+  /* ── 卡片 ── */
+  .card { background: #fff; border: 0.5px solid #e0dfd8; border-radius: 12px; padding: 24px; }
+
+  /* ── 学生端 ── */
+  .section-label { font-size: 11px; font-weight: 500; color: #888; letter-spacing: .06em;
+                   text-transform: uppercase; margin-bottom: 10px; }
+  .name-row { display: flex; gap: 8px; margin-bottom: 4px; }
+  .name-input { flex: 1; padding: 9px 12px; border: 0.5px solid #ccc; border-radius: 8px;
+                font-size: 14px; background: #fff; color: #1a1a18; outline: none; }
+  .name-input:focus { border-color: #888; box-shadow: 0 0 0 3px rgba(0,0,0,.06); }
+  .name-btn { padding: 9px 16px; border: 0.5px solid #ccc; border-radius: 8px;
+              background: #1a1a18; color: #fff; font-size: 13px; font-weight: 500; cursor: pointer; }
+  .name-btn:hover { background: #333; }
+
+  .identity-row { display: flex; align-items: center; gap: 10px; margin-bottom: 16px;
+                  padding: 10px 14px; background: #f5f4f0; border-radius: 8px; }
+  .avatar { width: 38px; height: 38px; border-radius: 50%; display: flex; align-items: center;
+            justify-content: center; font-size: 14px; font-weight: 600; flex-shrink: 0; }
+  .identity-name { font-size: 14px; font-weight: 500; }
+  .identity-sub { font-size: 12px; color: #888; }
+  .change-link { font-size: 12px; color: #888; text-decoration: underline; cursor: pointer; margin-left: auto; }
+
+  .choices { display: flex; flex-direction: column; gap: 8px; }
+  .choice-btn { display: flex; align-items: center; gap: 12px; padding: 13px 16px;
+                border-radius: 8px; border: 0.5px solid #e0dfd8; background: #fff;
+                cursor: pointer; font-size: 14px; color: #1a1a18; text-align: left;
+                width: 100%; transition: background .12s, border-color .12s; }
+  .choice-btn:hover { background: #f5f4f0; border-color: #ccc; }
+  .choice-btn.sel-got     { border: 1.5px solid #1D9E75; background: #E1F5EE; color: #085041; }
+  .choice-btn.sel-partial { border: 1.5px solid #BA7517; background: #FAEEDA; color: #412402; }
+  .choice-btn.sel-lost    { border: 1.5px solid #E24B4A; background: #FCEBEB; color: #501313; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .d-got     { background: #1D9E75; }
+  .d-partial { background: #BA7517; }
+  .d-lost    { background: #E24B4A; }
+
+  .submit-btn { margin-top: 12px; width: 100%; padding: 11px; border-radius: 8px;
+                border: 0.5px solid #ccc; background: #1a1a18; color: #fff;
+                font-size: 14px; font-weight: 500; cursor: pointer; transition: background .12s; }
+  .submit-btn:hover:not(:disabled) { background: #333; }
+  .submit-btn:disabled { opacity: .35; cursor: default; }
+  .toast { text-align: center; padding: 11px; font-size: 13px; color: #0F6E56;
+           background: #E1F5EE; border-radius: 8px; border: 0.5px solid #5DCAA5;
+           display: none; margin-top: 10px; }
+
+  /* ── 展示端 ── */
+  .row-between { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .dash-title  { font-size: 16px; font-weight: 500; }
+  .live-pill   { font-size: 11px; color: #0F6E56; background: #E1F5EE; border: 0.5px solid #5DCAA5;
+                 padding: 3px 9px; border-radius: 20px; display: flex; align-items: center; gap: 5px; }
+  .live-dot    { width: 6px; height: 6px; border-radius: 50%; background: #1D9E75; animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+  .small-btn   { font-size: 12px; color: #555; background: #fff; border: 0.5px solid #ddd;
+                 padding: 5px 12px; border-radius: 6px; cursor: pointer; }
+  .small-btn:hover { background: #f5f4f0; }
+  .danger-btn  { color: #A32D2D; border-color: #f09595; }
+
+  .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 20px; }
+  .metric  { background: #f5f4f0; border-radius: 8px; padding: 12px 14px; }
+  .metric-label { font-size: 11px; color: #888; margin-bottom: 3px; }
+  .metric-val   { font-size: 22px; font-weight: 500; }
+  .metric-pct   { font-size: 11px; color: #888; margin-top: 2px; }
+
+  .chart-wrap { position: relative; width: 100%; height: 210px; }
+  .legend { display: flex; gap: 14px; margin-top: 10px; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #888; }
+  .legend-sq { width: 9px; height: 9px; border-radius: 2px; }
+
+  .students-grid { display: flex; flex-wrap: wrap; gap: 6px; min-height: 36px; margin-top: 8px; }
+  .s-chip { display: flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 20px;
+            font-size: 12px; border: 0.5px solid; }
+  .s-chip.got     { background: #E1F5EE; border-color: #5DCAA5; color: #085041; }
+  .s-chip.partial { background: #FAEEDA; border-color: #EF9F27; color: #412402; }
+  .s-chip.lost    { background: #FCEBEB; border-color: #F09595; color: #501313; }
+  .chip-dot { width: 6px; height: 6px; border-radius: 50%; }
+
+  .trend-wrap { position: relative; width: 100%; height: 180px; margin-top: 8px; }
+  .rounds-label { font-size: 12px; color: #888; margin-top: 6px; }
+
+  .history-list { display: flex; flex-direction: column; gap: 5px; margin-top: 8px;
+                  max-height: 180px; overflow-y: auto; }
+  .history-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+                  background: #f5f4f0; border-radius: 8px; font-size: 12px; color: #888; }
+  .history-time  { font-size: 11px; color: #888; min-width: 56px; }
+  .history-bars  { display: flex; gap: 3px; flex: 1; align-items: center; }
+  .hbar          { height: 6px; border-radius: 3px; min-width: 4px; }
+  .history-total { font-size: 11px; color: #888; min-width: 32px; text-align: right; }
+
+  .divider { border: none; border-top: 0.5px solid #e0dfd8; margin: 20px 0; }
+
+  /* ── 配置提示横幅 ── */
+  .config-banner { background: #FAEEDA; border: 0.5px solid #EF9F27; border-radius: 10px;
+                   padding: 14px 18px; margin-bottom: 20px; font-size: 13px; color: #412402; }
+  .config-banner strong { font-weight: 600; }
+  .config-banner code { background: #fff3d6; padding: 1px 5px; border-radius: 4px; font-family: monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span class="topbar-title">课堂反馈</span>
+  <button class="tab active" onclick="switchTab(&#39;student&#39;)">学生端</button>
+  <button class="tab" onclick="switchTab(&#39;teacher&#39;)">展示端</button>
+</div>
+
+<!-- ══ 学生端 ══════════════════════════════════════════════ -->
+<div id="panel-student" class="panel active">
+  <div id="config-warning" class="config-banner" style="display: none;">
+    ⚠️ <strong>尚未配置 Firebase</strong> — 请先按照下方步骤填入你的
+    <code>firebaseConfig</code>，否则数据无法同步。
+  </div>
+
+  <div class="card" style="max-width:420px;margin:0 auto">
+    <div id="name-setup" style="display: block;">
+      <div class="section-label">输入你的昵称</div>
+      <div class="name-row">
+        <input class="name-input" id="nickname-input" placeholder="例如：小明、Jane..." maxlength="12" onkeydown="if(event.key===&#39;Enter&#39;)confirmName()">
+        <button class="name-btn" onclick="confirmName()">确认</button>
+      </div>
+      <div id="name-error" style="font-size:12px;color:#A32D2D;display:none;margin-top:6px">请输入昵称才能继续</div>
+    </div>
+
+    <div id="feedback-form" style="display: none;">
+      <div class="identity-row">
+        <div class="avatar" id="student-avatar" style="background: rgba(239, 159, 39, 0.2); color: rgb(239, 159, 39);">JA</div>
+        <div>
+          <div class="identity-name" id="student-name-display">jack</div>
+          <div class="identity-sub">选择你当前的状态</div>
+        </div>
+        <span class="change-link" onclick="changeName()">更换</span>
+      </div>
+      <div class="choices">
+        <button class="choice-btn" id="btn-got" onclick="selectChoice(&#39;got&#39;)" style="">
+          <span class="dot d-got"></span>听懂了，继续吧
+        </button>
+        <button class="choice-btn" id="btn-partial" onclick="selectChoice(&#39;partial&#39;)" style="">
+          <span class="dot d-partial"></span>有点困惑，稍微慢一点
+        </button>
+        <button class="choice-btn" id="btn-lost" onclick="selectChoice(&#39;lost&#39;)" style="">
+          <span class="dot d-lost"></span>需要再讲一遍
+        </button>
+      </div>
+      <button class="submit-btn" id="submit-btn" onclick="submitFeedback()" disabled="" style="">提交反馈</button>
+      <div class="toast" id="toast" style="display: none;">✓ 已收到你的反馈！</div>
+      <div id="submitted-info" style="display: none; font-size: 12px; color: rgb(136, 136, 136); margin-top: 8px; text-align: center;">提交时间：11:08:31</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ 展示端 ══════════════════════════════════════════════ -->
+<div id="panel-teacher" class="panel">
+  <div class="row-between">
+    <span class="dash-title">课堂脉搏</span>
+    <div style="display:flex;gap:8px;align-items:center">
+      <span class="live-pill"><span class="live-dot"></span>实时</span>
+      <button class="small-btn" onclick="newRound()">新一轮 →</button>
+      <button class="small-btn danger-btn" onclick="clearAll()">清空全部</button>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px">
+    <div class="metrics">
+      <div class="metric">
+        <div class="metric-label">听懂了</div>
+        <div class="metric-val" id="m-got">0</div>
+        <div class="metric-pct" id="p-got">—</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">有点困惑</div>
+        <div class="metric-val" id="m-partial">0</div>
+        <div class="metric-pct" id="p-partial">—</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">需要再讲</div>
+        <div class="metric-val" id="m-lost">0</div>
+        <div class="metric-pct" id="p-lost">—</div>
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="barChart" role="img" aria-label="当前轮次课堂反馈柱状图，三种状态人数" width="964" height="315" style="display: block; box-sizing: border-box; height: 210px; width: 642px;">暂无数据</canvas>
+    </div>
+    <div class="legend">
+      <span class="legend-item"><span class="legend-sq" style="background:#1D9E75"></span>听懂了</span>
+      <span class="legend-item"><span class="legend-sq" style="background:#BA7517"></span>有点困惑</span>
+      <span class="legend-item"><span class="legend-sq" style="background:#E24B4A"></span>需要再讲</span>
+    </div>
+    <div id="total-row" style="font-size:12px;color:#888;margin-top:8px">尚未收到反馈</div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px">
+    <div class="section-label">学生状态</div>
+    <div class="students-grid" id="students-grid"><span style="font-size:12px;color:#888">暂无学生</span></div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px">
+    <div class="section-label">历史趋势</div>
+    <div class="trend-wrap">
+      <canvas id="trendChart" role="img" aria-label="多轮次历史趋势折线图，各状态百分比变化" width="964" height="270" style="display: block; box-sizing: border-box; height: 180px; width: 642px;">暂无历史数据</canvas>
+    </div>
+    <div class="legend" style="margin-top:10px">
+      <span class="legend-item"><span class="legend-sq" style="background:#1D9E75"></span>听懂了 %</span>
+      <span class="legend-item"><span class="legend-sq" style="background:#BA7517;opacity:.7"></span>困惑 %</span>
+      <span class="legend-item"><span class="legend-sq" style="background:#E24B4A;opacity:.7"></span>再讲 %</span>
+    </div>
+    <div class="rounds-label" id="rounds-label">共 1 轮历史记录</div>
+  </div>
+
+  <div class="card">
+    <div class="section-label">轮次记录</div>
+    <div class="history-list" id="history-list"><div class="history-item">
+          <span class="history-time">11:08</span>
+          <div class="history-bars">
+            <div class="hbar" style="width:80px;background:#1D9E75" title="听懂了 1"></div>
+            <div class="hbar" style="width:4px;background:#BA7517" title="困惑 0"></div>
+            <div class="hbar" style="width:4px;background:#E24B4A" title="再讲 0"></div>
+          </div>
+          <span class="history-total">1人</span>
+        </div></div>
+  </div>
+</div>
+
+<script>
+  // 隐藏配置警告（如果用户已填入真实 config）
+  window.addEventListener("load", () => {
+    const scripts = document.querySelectorAll("script[type=module]");
+    // 仅在填好 config 后才隐藏
+    const src = scripts[0] ? scripts[0].textContent : "";
+    if (!src.includes("YOUR_API_KEY")) {
+      const w = document.getElementById("config-warning");
+      if (w) w.style.display = "none";
+    }
+  });
+</script>
+
+
+</body></html>
